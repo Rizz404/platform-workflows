@@ -1,0 +1,218 @@
+name: Reusable Container Build
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        type: string
+        required: true
+      context:
+        type: string
+        default: "."
+      dockerfile:
+        type: string
+        default: Dockerfile
+      container-port:
+        type: number
+        default: 8080
+      health-path:
+        type: string
+        default: /api/health
+      smoke-env:
+        type: string
+        default: ""
+      publish:
+        type: boolean
+        default: false
+
+    secrets:
+      registry-username:
+        required: false
+      registry-token:
+        required: false
+
+    outputs:
+      image-tag:
+        value: ${{ jobs.container.outputs.image-tag }}
+      image-digest:
+        value: ${{ jobs.container.outputs.image-digest }}
+
+permissions:
+  contents: read
+
+jobs:
+  container:
+    name: Container Build & Security
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    outputs:
+      image-tag: ${{ steps.metadata.outputs.image-tag }}
+      image-digest: ${{ steps.publish.outputs.image-digest }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Generate image metadata
+        id: metadata
+        env:
+          IMAGE_NAME: ${{ inputs.image-name }}
+        run: |
+          echo "image-tag=${IMAGE_NAME}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build container image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: ${{ steps.metadata.outputs.image-tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+          sbom: false
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Scan repository for secrets
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: "."
+          scanners: secret
+          format: table
+          exit-code: "1"
+
+      - name: Generate vulnerability report
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ steps.metadata.outputs.image-tag }}
+          scanners: vuln
+          format: json
+          output: trivy-report.json
+          exit-code: "0"
+          skip-setup-trivy: true
+
+      - name: Generate SBOM
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ steps.metadata.outputs.image-tag }}
+          format: cyclonedx
+          output: sbom.cdx.json
+          exit-code: "0"
+          skip-setup-trivy: true
+
+      - name: Enforce vulnerability policy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ steps.metadata.outputs.image-tag }}
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          format: table
+          exit-code: "1"
+          skip-setup-trivy: true
+
+      - name: Docker runtime smoke test
+        env:
+          IMAGE_TAG: ${{ steps.metadata.outputs.image-tag }}
+          CONTAINER_PORT: ${{ inputs.container-port }}
+          HEALTH_PATH: ${{ inputs.health-path }}
+          SMOKE_ENV: ${{ inputs.smoke-env }}
+        run: |
+          set -euo pipefail
+
+          container_name="ci-smoke-${GITHUB_RUN_ID}"
+          env_file="${RUNNER_TEMP}/smoke.env"
+
+          printf '%s\n' "$SMOKE_ENV" > "$env_file"
+
+          cleanup() {
+            docker logs "$container_name" 2>/dev/null || true
+            docker rm -f -v "$container_name" 2>/dev/null || true
+            rm -f "$env_file"
+          }
+
+          trap cleanup EXIT
+
+          docker run -d \
+            --pull=never \
+            --name "$container_name" \
+            --env-file "$env_file" \
+            -p "127.0.0.1::${CONTAINER_PORT}" \
+            "$IMAGE_TAG"
+
+          host_port="$(docker port "$container_name" "${CONTAINER_PORT}/tcp" | head -n 1 | awk -F: '{print $NF}')"
+          test -n "$host_port"
+
+          for attempt in $(seq 1 30); do
+            if curl -fsS --max-time 3 "http://127.0.0.1:${host_port}${HEALTH_PATH}"; then
+              echo "HTTP smoke test passed"
+
+              uid="$(docker exec "$container_name" id -u)"
+              test "$uid" != "0"
+
+              echo "Non-root verification passed"
+              exit 0
+            fi
+
+            sleep 2
+          done
+
+          echo "Application failed the smoke test"
+          exit 1
+
+      - name: Upload security artifacts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: container-security-${{ github.run_id }}
+          path: |
+            trivy-report.json
+            sbom.cdx.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Authenticate to Docker Hub
+        if: inputs.publish && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: docker.io
+          username: ${{ secrets.registry-username }}
+          password: ${{ secrets.registry-token }}
+
+      - name: Publish validated image
+        id: publish
+        if: inputs.publish && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          IMAGE_TAG: ${{ steps.metadata.outputs.image-tag }}
+          IMAGE_NAME: ${{ inputs.image-name }}
+        run: |
+          set -euo pipefail
+
+          docker push "$IMAGE_TAG"
+
+          digest="$(docker buildx imagetools inspect "$IMAGE_TAG" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+
+          echo "image-digest=${IMAGE_NAME}@${digest}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Published Container"
+            echo ""
+            echo "- Tag: ${IMAGE_TAG}"
+            echo "- Digest: ${IMAGE_NAME}@${digest}"
+          } >> "$GITHUB_STEP_SUMMARY"
