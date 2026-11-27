@@ -1,0 +1,68 @@
+name: Reusable Node.js CI
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: Directory containing package.json
+        type: string
+        default: "."
+      node-version:
+        description: Node.js version
+        type: string
+        required: true
+      run-lint:
+        description: Run npm lint script
+        type: boolean
+        default: true
+      run-tests:
+        description: Run npm test script
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: Node.js CI
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+          cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run lint
+        if: inputs.run-lint
+        run: npm run lint
+
+      - name: Run tests
+        if: inputs.run-tests
+        run: npm test
+
+      - name: Build application
+        run: npm run build
+
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
+
+      - name: Verify dependency files unchanged
+        run: git diff --exit-code -- package.json package-lock.json
