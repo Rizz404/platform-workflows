@@ -26,4 +26,9 @@ Call reusable workflows from application repositories using `workflow_call` inpu
 
 ## Status
 
-Experimental. Currently being validated using lrc-translate as the pilot application.
+Pilot-validated using lrc-translate (Go and React).
+
+Reusable CI, container builds, security scanning, SBOM generation,
+runtime smoke testing, and registry publishing are supported.
+
+Production deployment integration is planned for a later phase.
