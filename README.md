@@ -4,10 +4,11 @@ Reusable GitHub Actions workflows for portable, secure, and maintainable CI/CD.
 
 ## Available Workflows
 
-| Workflow    | Purpose                                                                     |
-| ----------- | --------------------------------------------------------------------------- |
-| ci-go.yml   | Go dependency verification, formatting, static analysis, testing, and build |
-| ci-node.yml | npm installation, linting, testing, build, and dependency auditing          |
+| Workflow             | Purpose                                                                                                  |
+| -------------------- | -------------------------------------------------------------------------------------------------------- |
+| ci-go.yml            | Go dependency verification, formatting, static analysis, testing, and build                              |
+| ci-node.yml          | npm installation, linting, testing, build, and dependency auditing                                       |
+| container-build.yaml | Container build, vulnerability scanning, SBOM generation, runtime smoke testing, and registry publishing |
 
 ## Design Principles
 
